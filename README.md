@@ -85,8 +85,12 @@ Sigma_emp = np.cov(panel_centered.to_numpy(), rowvar=False)
 To stabilise $\Sigma$:
 
 $$
-\min_{S\succ0}\;
--\log\det S + \operatorname{tr}(S\Sigma_{\text{emp}}) + \lambda\|S\|_{1,\text{off}}.
+\min_{S \succ 0} 
+\; \big(
+ -\log \det S 
+ + \operatorname{tr}(S \Sigma_{\text{emp}}) 
+ + \lambda \| S \|_{1,\text{off}}
+ \big)
 $$
 
 ```python
