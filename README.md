@@ -20,19 +20,19 @@ All optimisation steps are solved with **[CVXPY](https://www.cvxpy.org)** and ad
 ## 🧩 Phase 1 — Censored Regression
 
 ### Mathematical Formulation
-For features \(x_i\) and observed deal values \(y_i\):
+For features $x_i$ and observed deal values $y_i$:
 
-\[
+$$
 \min_{c}\;
 \sum_{i\in\mathcal{U}} (y_i - c^\top x_i)^2
 +\lambda \|c\|_2^2
 \quad
 \text{s.t. } c^\top x_j \ge D,\; j\in\mathcal{C}.
-\]
+$$
 
-- \( \mathcal{U} \): set of uncensored (disclosed) deals  
-- \( \mathcal{C} \): set of censored (undisclosed) deals  
-- \(D\): censoring threshold (e.g. 75th percentile of disclosed values)
+- $\mathcal{U}$: set of uncensored (disclosed) deals  
+- $\mathcal{C}$: set of censored (undisclosed) deals  
+- $D$: censoring threshold (e.g. 75th percentile of disclosed values)
 
 This is a **convex quadratic program (QP)**:  
 quadratic objective + linear constraints.
@@ -62,12 +62,12 @@ result = prob.solve(solver=cp.OSQP)
 
 ### Objective
 Convert predicted deal prices into firm-level monthly profit flows, then compute  
-expected returns \( \mu \) and covariances \( \Sigma \):
+expected returns $\mu$ and covariances $\Sigma$:
 
-\[
+$$
 \mu_j = \frac{1}{T}\sum_t p_{t,j}, \qquad
 \Sigma_{jk} = \frac{1}{T-1}\sum_t (p_{t,j}-\mu_j)(p_{t,k}-\mu_k).
-\]
+$$
 
 ### Code Summary
 ```python
@@ -82,11 +82,13 @@ Sigma_emp = np.cov(panel_centered.to_numpy(), rowvar=False)
 ```
 
 ### Convex Log-Det Regularisation (Graphical Lasso)
-To stabilise Σ:
-\[
+To stabilise $\Sigma$:
+
+$$
 \min_{S\succ0}\;
 -\log\det S + \operatorname{tr}(S\Sigma_{\text{emp}}) + \lambda\|S\|_{1,\text{off}}.
-\]
+$$
+
 ```python
 S = cp.Variable((n,n), symmetric=True)
 offdiag = cp.norm1(S - cp.multiply(np.eye(n), S))
@@ -104,24 +106,26 @@ Panel shape (T×n): (207, 27)
 Status: optimal_inaccurate
 ```
 ✅ **27 companies**, **207 months**, convex solver converged.  
-Resulting Σ is positive-definite and well-conditioned for portfolio optimisation.
+Resulting $\Sigma$ is positive-definite and well-conditioned for portfolio optimisation.
 
 ---
 
 ## 💼 Phase 3 — Portfolio Optimisation
 
 ### Markowitz Mean–Variance Formulation
-\[
+$$
 \min_w -\mu^\top w + \gamma\,w^\top\Sigma w
 \quad
 \text{s.t. } 1^\top w = 1,\; w \ge 0.
-\]
+$$
+
 and  
-\[
+
+$$
 \min_w w^\top\Sigma w
 \quad
 \text{s.t. } \mu^\top w \ge r_{\min},\; 1^\top w=1,\; w\ge0.
-\]
+$$
 
 ### Implementation
 ```python
@@ -132,7 +136,7 @@ def solve_markowitz_scalarized(mu, Sigma, gamma):
     prob.solve(solver=cp.OSQP)
     return w.value
 ```
-25 values of γ ∈ [10⁻³, 10²] produce the **efficient frontier** of return vs risk.
+25 values of $\gamma \in [10^{-3}, 10^{2}]$ produce the **efficient frontier** of return vs risk.
 
 ### Results
 #### Efficient Frontier
@@ -141,15 +145,15 @@ def solve_markowitz_scalarized(mu, Sigma, gamma):
 | 0.001 | 388.21 | 23.99 |
 | ⋮ | … | … |
 
-#### Return-Seeking Portfolio (γ = 0.001)
+#### Return-Seeking Portfolio ($\gamma = 0.001$)
 | Entity | Weight |
 |:--|--:|
 | Google | 1.00 |
 | Others | 0.00 |
 
-Corner solution — all capital allocated to the highest-μ company.
+Corner solution — all capital allocated to the highest-$\mu$ company.
 
-#### Target-Return (μ ≥ 87.37) Minimum-Variance Portfolio
+#### Target-Return ($\mu \ge 87.37$) Minimum-Variance Portfolio
 | Top 10 Firms | Weight |
 |:--|--:|
 | Dropbox | 0.218 |
@@ -171,9 +175,9 @@ Diversified portfolio achieves required return with minimal risk.
 
 | Phase | Mathematical Core | Key Output | Real-World Meaning |
 |:--|:--|:--|:--|
-| 1 | Quadratic program with linear inequalities | \( c^\star \) and predicted prices | Filled missing deal values |
-| 2 | Convex log-det precision estimation | \( (\mu,\Sigma) \) | Risk–return structure across firms |
-| 3 | Quadratic program (mean–variance) | \( w^\star \) | Optimal portfolio allocation |
+| 1 | Quadratic program with linear inequalities | $c^\star$ and predicted prices | Filled missing deal values |
+| 2 | Convex log-det precision estimation | $(\mu,\Sigma)$ | Risk–return structure across firms |
+| 3 | Quadratic program (mean–variance) | $w^\star$ | Optimal portfolio allocation |
 
 ---
 
