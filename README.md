@@ -1,236 +1,96 @@
-# 🧮 Convex Optimisation for Business Acquisition Valuation  
-### *Censored Regression  |  Covariance Estimation  |  Portfolio Optimisation*
+# Advanced Portfolio Optimisation Pipeline
+
+End-to-end workflow for preparing returns, estimating covariance, and constructing a Markowitz efficient frontier from SP500-style panel data. The primary entry point is the notebook `adv-opti-project.ipynb`.
+
+**Phases**
+- Phase 1 — Censored target construction and bounds
+- Phase 2 — Covariance estimation (regularised)
+- Phase 3 — Markowitz mean–variance portfolio and frontier
 
 ---
 
-## 📘 Project Overview
-This project demonstrates an **end-to-end convex-optimisation pipeline** applied to *Mergers & Acquisitions (M&A)* data.  
-Incomplete acquisition prices are reconstructed, risk structures estimated, and optimal portfolio allocations derived — all through mathematically guaranteed convex programs.
-
-| Phase | Convex Objective | Practical Purpose |
-|:--|:--|:--|
-| **1. Censored Regression** | Estimate missing deal values under right-censoring constraints | Rebuild undisclosed M&A prices |
-| **2. Covariance Estimation** | Compute mean (μ) and covariance (Σ) of predicted profits | Quantify expected return & risk |
-| **3. Portfolio Optimisation** | Solve the Markowitz mean-variance QP | Allocate capital efficiently |
-
-All optimisation steps are solved with **[CVXPY](https://www.cvxpy.org)** and adhere to the *Disciplined Convex Programming (DCP)* ruleset.
+## Project Structure
+- `adv-opti-project.ipynb` — main notebook with the full pipeline
+- `financial_data_sp500_extended_synth_return_censored_bounds_FIXED.csv` — input for Phase 1
+- `financial_data_sp500_convex_imputed.csv` — imputed return panel used in Phases 2–3
+- `results/` — saved artifacts (frontier, weights, plots)
 
 ---
 
-## 🧩 Phase 1 — Censored Regression
+## Phase 1 — Censored Target + Bounds
+Build a clean target “return” column and censor a subset of rows to simulate missing labels, while keeping predictors intact.
 
-### Mathematical Formulation
-For features $x_i$ and observed deal values $y_i$:
+Key steps:
+- Auto-detect important columns (company key, date, gross profit, operating expense)
+- Compute `return = GrossProfit / OperatingExpense` with safe division
+- Randomly censor only the `return` values to create `is_hole` flags
+- Compute per-company bounds for censored rows from original history:
+  - global: min/max over all history
+  - trailing: min/max within a trailing window before the hole date
+- Sort and save the extended dataset
 
-$$
-\min_{c}\;
-\sum_{i\in\mathcal{U}} (y_i - c^\top x_i)^2
-+\lambda \|c\|_2^2
-\quad
-\text{s.t. } c^\top x_j \ge D,\; j\in\mathcal{C}.
-$$
+Outputs:
+- `financial_data_sp500_extended_synth_return_censored_bounds.csv`
 
-- $\mathcal{U}$: set of uncensored (disclosed) deals  
-- $\mathcal{C}$: set of censored (undisclosed) deals  
-- $D$: censoring threshold (e.g. 75th percentile of disclosed values)
-
-This is a **convex quadratic program (QP)**:  
-quadratic objective + linear constraints.
-
-### Implementation Highlights
-```python
-c = cp.Variable(n)
-objective = cp.Minimize(cp.sum_squares(X_unc @ c - y_sc) + λ*cp.sum_squares(c))
-constraints = [X_cen @ c >= D_scaled]
-prob = cp.Problem(objective, constraints)
-result = prob.solve(solver=cp.OSQP)
-```
-
-### Results
-| Metric | Observation |
-|:--|:--|
-| Status | `optimal` |
-| Features retained | 201 / 488 (low-variance columns dropped) |
-| Censored rows | 1 218 (≈ 8 % minor tolerance violations) |
-| Output | Full vector of predicted acquisition prices |
-
-**Outcome:** A complete and numerically stable dataset of reconstructed deal prices.
+Notes:
+- Predictors are forward-filled per company, then filled with company medians from the original data; remaining NaNs → 0
+- Only the target `return` is censored — predictors remain usable for modeling
 
 ---
 
-## 📈 Phase 2 — Covariance Estimation
+## Phase 2 — Covariance Estimation (Panel of Returns)
+Load an imputed panel of firm returns (wide format: dates × firms), impute any residual gaps by column mean, then compute expected returns and a regularised covariance matrix.
 
-### Objective
-Convert predicted deal prices into firm-level monthly profit flows, then compute  
-expected returns $\mu$ and covariances $\Sigma$:
+Key steps:
+- Build full panel across all months and firms from `financial_data_sp500_convex_imputed.csv`
+- Mean-impute per firm; fallback to zero if a column is entirely missing
+- Compute `mu` (per-firm mean) and centre data
+- Regularise covariance:
+  - Prefer `LedoitWolf` shrinkage (from scikit-learn)
+  - Fallback to ridge shrinkage if Ledoit–Wolf isn’t available
+- Ensure numerical stability (symmetrise, small diagonal jitter)
 
-$$
-\mu_j = \frac{1}{T}\sum_t p_{t,j}, \qquad
-\Sigma_{jk} = \frac{1}{T-1}\sum_t (p_{t,j}-\mu_j)(p_{t,k}-\mu_k).
-$$
+Artifacts in-memory:
+- `panel_imputed` (DataFrame T×n), `mu` (n,), `Sigma_reg` (n×n)
 
-### Code Summary
-```python
-# Build monthly panel (207 months × 27 firms)
-panel = (
-    df.groupby(['month','Acquiring Company'])['predicted_price']
-      .sum().unstack().fillna(0.0)
-)
-panel_centered = panel - panel.mean()
-mu = panel.mean(axis=0).to_numpy()
-Sigma_emp = np.cov(panel_centered.to_numpy(), rowvar=False)
-```
-
-### Convex Log-Det Regularisation (Graphical Lasso)
-To stabilise $\Sigma$:
-
-$$
-\min_{S \succ 0} 
-\; \big(
- -\log \det S 
- + \operatorname{tr}(S \Sigma_{\text{emp}}) 
- + \lambda \| S \|_{1,\text{off}}
- \big)
-$$
-
-```python
-S = cp.Variable((n,n), symmetric=True)
-offdiag = cp.norm1(S - cp.multiply(np.eye(n), S))
-obj = cp.Minimize(-cp.log_det(S) + cp.trace(S @ Sigma_emp) + λ*offdiag)
-prob = cp.Problem(obj, [S >> 1e-6*np.eye(n)])
-prob.solve(solver=cp.SCS, use_indirect=True)
-Sigma_glasso = np.linalg.pinv(S.value + 1e-8*np.eye(n))
-```
-
-### Output
-```
-Entities (n): 27
-Panel shape (T×n): (207, 27)
-μ shape: (27,) | Σ shape: (27,27)
-Status: optimal_inaccurate
-```
-✅ **27 companies**, **207 months**, convex solver converged.  
-Resulting $\Sigma$ is positive-definite and well-conditioned for portfolio optimisation.
+Optional outputs (can be added):
+- `phase2_panel_full.csv`, `phase2_mu_full.csv`, `phase2_Sigma_full.csv`
 
 ---
 
-## 💼 Phase 3 — Portfolio Optimisation
+## Phase 3 — Markowitz Efficient Frontier
+Solve a long-only mean–variance problem for a grid of risk aversion values `gamma`, using projected gradient descent (PGD) with projection onto the simplex (`w ≥ 0`, `sum w = 1`).
 
-### Markowitz Mean–Variance Formulation
-$$
-\min_w -\mu^\top w + \gamma\,w^\top\Sigma w
-\quad
-\text{s.t. } 1^\top w = 1,\; w \ge 0.
-$$
+Key steps:
+- Helper: Euclidean projection to the simplex for feasibility
+- PGD optimiser for `min_w -mu^T w + gamma w^T Σ w`
+- Sweep `gamma` (log-spaced) to build the frontier
+- Compute and print key portfolios: max Sharpe (tangency), min variance, and max return
+- Visualise frontier, Sharpe profile, top firms, and concentration (HHI)
 
-and  
-
-$$
-\min_w w^\top\Sigma w
-\quad
-\text{s.t. } \mu^\top w \ge r_{\min},\; 1^\top w=1,\; w\ge0.
-$$
-
-### Implementation
-```python
-def solve_markowitz_scalarized(mu, Sigma, gamma):
-    w = cp.Variable(n)
-    obj = -mu @ w + gamma * cp.quad_form(w, Sigma)
-    prob = cp.Problem(cp.Minimize(obj), [cp.sum(w)==1, w>=0])
-    prob.solve(solver=cp.OSQP)
-    return w.value
-```
-25 values of $\gamma \in [10^{-3}, 10^{2}]$ produce the **efficient frontier** of return vs risk.
-
-### Results
-#### Efficient Frontier
-| γ | Expected Return | Risk (Std Dev) |
-|:--|--:|--:|
-| 0.001 | 388.21 | 23.99 |
-| ⋮ | … | … |
-
-#### Return-Seeking Portfolio ($\gamma = 0.001$)
-| Entity | Weight |
-|:--|--:|
-| Google | 1.00 |
-| Others | 0.00 |
-
-Corner solution — all capital allocated to the highest-$\mu$ company.
-
-#### Target-Return ($\mu \ge 87.37$) Minimum-Variance Portfolio
-| Top 10 Firms | Weight |
-|:--|--:|
-| Dropbox | 0.218 |
-| LinkedIn | 0.073 |
-| Dell | 0.065 |
-| Qualcomm | 0.061 |
-| Salesforce | 0.049 |
-| AT&T | 0.046 |
-| Intel | 0.042 |
-| Oracle | 0.037 |
-| Symantec | 0.036 |
-| Adobe | 0.036 |
-
-Diversified portfolio achieves required return with minimal risk.
+Saved outputs (if enabled in the notebook):
+- `results/frontier.csv` — columns: `gamma, expected_return, risk_std`
+- `results/portfolio_weights.csv` — top portfolio weights (example export)
+- `results/covariance_heatmap.png` — optional visualisation
 
 ---
 
-## 🔬 Interpretation Across Phases
+## How To Run
+1) Open `adv-opti-project.ipynb` and run all cells in order.
+2) Inspect artifacts:
+   - View all 40 frontier points in the `frontier` DataFrame (`frontier`, `frontier.tail()`).
+   - Explore weights with `pd.Series(weights[i], index=firms)` for any frontier index `i`.
+3) Persist results by uncommenting the `to_csv(...)` lines in Phase 3.
 
-| Phase | Mathematical Core | Key Output | Real-World Meaning |
-|:--|:--|:--|:--|
-| 1 | Quadratic program with linear inequalities | $c^\star$ and predicted prices | Filled missing deal values |
-| 2 | Convex log-det precision estimation | $(\mu,\Sigma)$ | Risk–return structure across firms |
-| 3 | Quadratic program (mean–variance) | $w^\star$ | Optimal portfolio allocation |
-
----
-
-## 🧠 Key Insights
-- Convex optimisation offers **global optimality** and **interpretability** for complex financial pipelines.  
-- Censored regression robustly imputes missing valuations.  
-- Log-det covariance regularisation ensures positive-definite, stable risk estimates.  
-- Portfolio optimisation clearly illustrates the **risk–return trade-off** and efficient frontier.  
+Dependencies used in the notebook’s first import cell:
+- `numpy`, `pandas`, `matplotlib`
+- `cvxpy` (optional for alternative solvers)
+- `scikit-learn` (`LedoitWolf`)
 
 ---
 
-## 🏁 Final Conclusion
-Through convex optimisation, incomplete and noisy M&A data can be transformed into a **coherent, risk-aware investment framework**.
+## Practical Notes
+- Check return scaling: ensure input returns are in decimals (e.g., 0.01 = 1%) before optimisation to keep risk/Sharpe magnitudes realistic.
+- Add constraints as needed (e.g., position caps) if concentration is undesirable.
+- Reproducibility: random seeds are set where applicable; results depend on the chosen imputation and regularisation methods.
 
-1. **Phase 1** reconstructed undisclosed acquisition prices, ensuring a complete dataset.  
-2. **Phase 2** derived statistically consistent means and covariances, capturing firm inter-dependencies.  
-3. **Phase 3** translated these statistics into optimal portfolios — from single-firm corner solutions to diversified, minimum-risk allocations.  
-
-> The workflow demonstrates how convex optimisation unifies estimation, uncertainty quantification, and decision-making in a single mathematical language.  
-> Each stage was convex, DCP-compliant, and solved to global optimality using CVXPY.
-
----
-
-## 🧰 Environment
-| Library | Version | Role |
-|:--|:--|:--|
-| Python | ≥ 3.10 | environment |
-| CVXPY | ≥ 1.7 | convex solvers |
-| NumPy / Pandas | ≥ 2.0 / 2.1 | numerical + data prep |
-| OSQP / SCS | latest | QP + conic solvers |
-
----
-
-## 📂 Repository Structure
-```
-├── opti-proj.ipynb            # Full notebook (Phases 1–3)
-├── Convex_Optimisation_Report.docx  # Formal report
-├── README.md                  # (this file)
-├── data/
-│   ├── acquisitions.csv
-│   └── merged_phase1.csv
-└── results/
-    ├── frontier.csv
-    ├── portfolio_weights.csv
-    └── covariance_heatmap.png
-```
-
----
-
-## 📚 References
-- S. Boyd & L. Vandenberghe, *Convex Optimisation*, Cambridge University Press (2004)  
-- S. Diamond & S. Boyd, “CVXPY: A Python-Embedded Modeling Language for Convex Optimization,” JMLR (2016)
